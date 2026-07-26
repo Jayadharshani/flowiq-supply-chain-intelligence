@@ -6,13 +6,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 import pandas as pd
 import joblib
- 
+
 from database import engine, Base, get_db
 from DB_models import PredictionHistory, User
 from AUTH import (
     hash_password, verify_password, create_access_token, get_current_user
 )
- 
+
 # ==========================================================
 # CREATE DATABASE TABLES (IF THEY DON'T EXIST YET)
 # ==========================================================
@@ -20,30 +20,30 @@ from AUTH import (
 # PredictionHistory in models.py) and creates the matching table
 # in the database if it isn't already there. Safe to run every
 # time the server starts - it won't wipe existing data.
- 
+
 Base.metadata.create_all(bind=engine)
- 
+
 # ==========================================================
 # LOAD MODEL + PREPROCESSING ARTIFACTS (ONCE, AT STARTUP)
 # ==========================================================
 # This happens ONE time when the server starts, not on every
 # request - loading a .pkl file is relatively slow, so we don't
 # want to repeat it for every single prediction.
- 
+
 import os
- 
+
 # BASE_DIR = the folder this app.py file lives in (backend/).
 # Using a path relative to this file - instead of a hardcoded
 # Windows path - means the exact same code works locally on
 # Windows AND on Render's Linux servers without any changes.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 NOTEBOOKS_DIR = os.path.join(BASE_DIR, "..", "notebooks")
- 
+
 model = joblib.load(os.path.join(NOTEBOOKS_DIR, "best_model.pkl"))
 scaler = joblib.load(os.path.join(NOTEBOOKS_DIR, "scaler.pkl"))
 encoders = joblib.load(os.path.join(NOTEBOOKS_DIR, "label_encoders.pkl"))
 feature_columns = joblib.load(os.path.join(NOTEBOOKS_DIR, "feature_columns.pkl"))
- 
+
 # A handful of REAL orders from the training data, kept in memory so
 # the frontend can offer them as ready-made templates ("load a sample
 # order") instead of one single hardcoded example. Only raw/original
@@ -57,23 +57,37 @@ _raw_sample_columns = [
     "product_weight_g", "product_length_cm", "product_height_cm", "product_width_cm",
     "payment_sequential", "payment_type", "payment_installments", "payment_value",
 ]
-_full_dataset = pd.read_csv(os.path.join(NOTEBOOKS_DIR, "master_dataset_features.csv"))
-_delivered_only = _full_dataset[_full_dataset["order_status"] == "delivered"]
-sample_orders_df = (
-    _delivered_only[_raw_sample_columns]
-    .drop_duplicates(subset=["customer_city", "product_category_name"])
-    .sample(n=min(30, len(_delivered_only)), random_state=42)
-    .reset_index(drop=True)
-)
- 
+_dataset_path = os.path.join(NOTEBOOKS_DIR, "master_dataset_features.csv")
+
+# This CSV is a large raw-data file that isn't committed to git (see
+# .gitignore) - it's only used for the "load a sample order" convenience
+# feature, not for actual predictions. If it's missing (e.g. on Render,
+# where we don't upload it), we don't want that to crash the ENTIRE
+# app - /predict and /history must keep working regardless. So we
+# load it defensively: on success, sample_orders_df has real data;
+# on failure, it's just empty and /sample-orders returns an empty list.
+try:
+    _full_dataset = pd.read_csv(_dataset_path)
+    _delivered_only = _full_dataset[_full_dataset["order_status"] == "delivered"]
+    sample_orders_df = (
+        _delivered_only[_raw_sample_columns]
+        .drop_duplicates(subset=["customer_city", "product_category_name"])
+        .sample(n=min(30, len(_delivered_only)), random_state=42)
+        .reset_index(drop=True)
+    )
+    print(f"Loaded {len(sample_orders_df)} sample orders.")
+except FileNotFoundError:
+    print(f"WARNING: {_dataset_path} not found - /sample-orders will return an empty list.")
+    sample_orders_df = pd.DataFrame(columns=_raw_sample_columns)
+
 print("Model and preprocessing artifacts loaded.")
- 
+
 # ==========================================================
 # CREATE THE FASTAPI APP
 # ==========================================================
- 
+
 app = FastAPI(title="FlowIQ Delay Prediction API")
- 
+
 # CORS: without this, a frontend running on a different
 # origin (e.g. http://localhost:5173 for React) would be
 # BLOCKED by the browser from calling this API, even though
@@ -85,15 +99,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
- 
- 
+
+
 # ==========================================================
 # REQUEST SCHEMA (PYDANTIC MODEL)
 # ==========================================================
 # This defines exactly what a valid request must look like.
 # FastAPI uses this to auto-validate incoming JSON, auto-generate
 # API docs, and reject malformed requests before your code runs.
- 
+
 class OrderInput(BaseModel):
     order_purchase_timestamp: str        # e.g. "2018-05-14 10:30:00"
     order_estimated_delivery_date: str   # e.g. "2018-05-25 00:00:00"
@@ -115,8 +129,8 @@ class OrderInput(BaseModel):
     payment_type: str
     payment_installments: int
     payment_value: float
- 
- 
+
+
 class PredictionHistoryOut(BaseModel):
     id: int
     customer_city: str
@@ -128,42 +142,42 @@ class PredictionHistoryOut(BaseModel):
     late_delivery_predicted: bool
     late_probability: float
     risk_level: str
- 
+
     class Config:
         from_attributes = True  # allows creating this from a SQLAlchemy object directly
- 
- 
+
+
 # ==========================================================
 # SAME PREDICTION LOGIC AS 09_prediction.py
 # ==========================================================
- 
+
 def engineer_features(order: dict) -> dict:
     purchase_ts = pd.to_datetime(order["order_purchase_timestamp"])
     estimated_ts = pd.to_datetime(order["order_estimated_delivery_date"])
- 
+
     features = dict(order)
- 
+
     features["purchase_year"] = purchase_ts.year
     features["purchase_month"] = purchase_ts.month
     features["purchase_day"] = purchase_ts.day
     features["purchase_hour"] = purchase_ts.hour
     features["purchase_weekday"] = purchase_ts.dayofweek
- 
+
     features["total_order_value"] = order["price"] + order["freight_value"]
- 
+
     features["product_volume"] = (
         order["product_length_cm"] * order["product_width_cm"] * order["product_height_cm"]
     )
- 
+
     features["heavy_product"] = int(order["product_weight_g"] > 5000)
     features["multiple_installments"] = int(order["payment_installments"] > 1)
- 
+
     features["order_purchase_timestamp"] = int(purchase_ts.timestamp())
     features["order_estimated_delivery_date"] = int(estimated_ts.timestamp())
- 
+
     return features
- 
- 
+
+
 def encode_categoricals(features: dict) -> tuple[dict, list]:
     """
     Returns (encoded_features, unseen_fields).
@@ -183,19 +197,19 @@ def encode_categoricals(features: dict) -> tuple[dict, list]:
                 encoded[col] = -1
                 unseen_fields.append(col)
     return encoded, unseen_fields
- 
- 
+
+
 def predict_delay(order: dict) -> dict:
     features = engineer_features(order)
     features, unseen_fields = encode_categoricals(features)
- 
+
     row = pd.DataFrame([features])[feature_columns]
     scaled_row = scaler.transform(row)
     scaled_row = pd.DataFrame(scaled_row, columns=feature_columns)
- 
+
     prediction = model.predict(scaled_row)[0]
     probability = model.predict_proba(scaled_row)[0][1]
- 
+
     warning = None
     if unseen_fields:
         field_list = ", ".join(unseen_fields)
@@ -204,7 +218,7 @@ def predict_delay(order: dict) -> dict:
             f"(the model was trained on Brazilian Olist marketplace data). "
             f"This prediction is a rough guess and should not be trusted."
         )
- 
+
     return {
         "late_delivery_predicted": bool(prediction),
         "late_probability": round(float(probability), 4),
@@ -215,24 +229,24 @@ def predict_delay(order: dict) -> dict:
         ),
         "warning": warning,
     }
- 
- 
+
+
 # ==========================================================
 # API ENDPOINTS
 # ==========================================================
- 
+
 @app.get("/")
 def root():
     """Simple check to confirm the server is running."""
     return {"status": "FlowIQ API is running"}
- 
- 
+
+
 @app.get("/health")
 def health_check():
     """Used by monitoring tools / load balancers to check the API is alive."""
     return {"status": "ok"}
- 
- 
+
+
 @app.get("/options")
 def get_options():
     """
@@ -247,8 +261,8 @@ def get_options():
         col: sorted(le.classes_.tolist())
         for col, le in encoders.items()
     }
- 
- 
+
+
 @app.get("/sample-orders")
 def get_sample_orders():
     """
@@ -258,17 +272,17 @@ def get_sample_orders():
     instead of always starting from one single hardcoded example.
     """
     return sample_orders_df.to_dict(orient="records")
- 
- 
+
+
 # ==========================================================
 # AUTH ENDPOINTS
 # ==========================================================
- 
+
 class RegisterInput(BaseModel):
     username: str
     password: str
- 
- 
+
+
 @app.post("/register")
 def register(payload: RegisterInput, db: Session = Depends(get_db)):
     """
@@ -278,7 +292,7 @@ def register(payload: RegisterInput, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == payload.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="Username already taken")
- 
+
     new_user = User(
         username=payload.username,
         hashed_password=hash_password(payload.password),
@@ -286,44 +300,44 @@ def register(payload: RegisterInput, db: Session = Depends(get_db)):
     db.add(new_user)
     db.commit()
     return {"message": "User registered successfully"}
- 
- 
+
+
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """
     Checks username/password, and if correct, returns a signed JWT
     token. The frontend stores this token and sends it back with
     every future request to prove the user is logged in.
- 
+
     Uses OAuth2PasswordRequestForm (not a plain JSON body) because
     that's the standard FastAPI expects for the auto-generated
     /docs "Authorize" button to work correctly.
     """
     user = db.query(User).filter(User.username == form_data.username).first()
- 
+
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=401,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
- 
+
     token = create_access_token(data={"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
- 
- 
+
+
 @app.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     """Returns the currently logged-in user - useful for the frontend
     to check 'am I still logged in?' when the app loads."""
     return {"id": current_user.id, "username": current_user.username}
- 
- 
+
+
 # ==========================================================
 # PREDICTION ENDPOINTS (PROTECTED - LOGIN REQUIRED)
 # ==========================================================
- 
- 
+
+
 @app.post("/predict")
 def predict(
     order: OrderInput,
@@ -339,7 +353,7 @@ def predict(
     try:
         order_dict = order.model_dump()
         result = predict_delay(order_dict)
- 
+
         # Save this prediction as a new row in prediction_history
         history_entry = PredictionHistory(
             user_id=current_user.id,
@@ -355,12 +369,12 @@ def predict(
         )
         db.add(history_entry)
         db.commit()
- 
+
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
- 
- 
+
+
 @app.get("/history", response_model=list[PredictionHistoryOut])
 def get_history(
     limit: int = 50,
@@ -379,14 +393,14 @@ def get_history(
         .all()
     )
     return records
- 
- 
+
+
 # ==========================================================
 # RUN THE SERVER (for local development)
 # ==========================================================
 # In production you'd normally run uvicorn from the command line
 # instead, but this lets you just do `python app.py` to test locally.
- 
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
