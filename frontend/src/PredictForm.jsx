@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 
-const API_BASE = "http://127.0.0.1:8000";
+// Same pattern as Login.jsx - reads the live Render URL on Vercel,
+// falls back to your own machine when running npm run dev locally.
+const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
 const DEFAULT_ORDER = {
   order_purchase_timestamp: "2018-05-14 10:30:00",

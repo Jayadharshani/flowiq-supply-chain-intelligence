@@ -1,6 +1,11 @@
 import { useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8000";
+// Vite exposes environment variables prefixed with VITE_ via
+// import.meta.env. On Vercel, we'll set VITE_API_BASE to the live
+// Render URL. Locally (npm run dev), no such variable exists, so it
+// falls back to your own machine's backend - same pattern as
+// DATABASE_URL/SECRET_KEY on the backend.
+const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
 /*
   This component handles BOTH login and registration in one form,
