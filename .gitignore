@@ -4,7 +4,6 @@ __pycache__/
 backend/flowiq.db
 backend/*.db
 data/*.csv
-notebooks/master_dataset_features.csv
 notebooks/master_dataset_model_ready.csv
 frontend/node_modules/
 frontend/dist/
