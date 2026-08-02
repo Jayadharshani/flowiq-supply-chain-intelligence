@@ -59,13 +59,9 @@ _raw_sample_columns = [
 ]
 _dataset_path = os.path.join(NOTEBOOKS_DIR, "master_dataset_features.csv")
 
-# This CSV is a large raw-data file that isn't committed to git (see
-# .gitignore) - it's only used for the "load a sample order" convenience
-# feature, not for actual predictions. If it's missing (e.g. on Render,
-# where we don't upload it), we don't want that to crash the ENTIRE
-# app - /predict and /history must keep working regardless. So we
-# load it defensively: on success, sample_orders_df has real data;
-# on failure, it's just empty and /sample-orders returns an empty list.
+# Loaded defensively (try/except) so that if this file is ever missing
+# for any reason, that only disables the "load a sample order"
+# convenience feature - it doesn't crash /predict, /login, etc.
 try:
     _full_dataset = pd.read_csv(_dataset_path)
     _delivered_only = _full_dataset[_full_dataset["order_status"] == "delivered"]
@@ -79,6 +75,7 @@ try:
 except FileNotFoundError:
     print(f"WARNING: {_dataset_path} not found - /sample-orders will return an empty list.")
     sample_orders_df = pd.DataFrame(columns=_raw_sample_columns)
+
 
 print("Model and preprocessing artifacts loaded.")
 
